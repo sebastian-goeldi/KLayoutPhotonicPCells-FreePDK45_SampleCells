@@ -1,0 +1,566 @@
+<?xml version="1.0" encoding="utf-8"?>
+<klayout-macro>
+ <description>Example Cells</description>
+ <version/>
+ <category/>
+ <prolog/>
+ <epilog/>
+ <doc/>
+ <autorun>true</autorun>
+ <autorun-early>false</autorun-early>
+ <shortcut/>
+ <show-in-menu>false</show-in-menu>
+ <group-name/>
+ <menu-path/>
+ <interpreter>python</interpreter>
+ <dsl-interpreter-name/>
+ <text># This file is part of KLayoutPhotonicPCells, an extension for Photonic Layouts in KLayout.
+# Copyright (c) 2018, Sebastian Goeldi
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU Affero General Public License as
+#   published by the Free Software Foundation, either version 3 of the
+#   License, or (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.
+
+import pya
+import math
+from kppc.photonics import PhotDevice, PortCreation
+import kppc.photonics.layermaps as lm
+import numpy as np
+import os
+
+import kppc.photonics.techconstraints as con
+
+import kppc.photonics
+from importlib import reload
+reload(kppc.photonics)
+
+class FreePDK45Cell(PhotDevice):
+    """Class that provides technology specific data. Currently the backend needs 3 things to be supplied by the technology of the PCells.
+    As these are independent of specific PCells and parameters this should not give any difficulty with the requirement of Klayout to have the Classes stateless.
+
+    The layermap was created from a forum suggestion
+        (`Post &lt;https://community.cadence.com/cadence_technology_forums/f/custom-ic-design/37021/layer-map-file-for-gds-transfer-to-virtuoso&gt;` ) and then some layers were added by hand. This was made because it seems FreePDK45 doesn't come with a layermapping of its own, or they weren´t apparent.
+        layermap:       A dictionary containing layers with available purposes, which provide a layer/purpose. This is loaded from a .layermap file.
+                        Example of this FreePDK45:
+                            {'active': {'blockage': (1, 1), 'drawing': (1, 0)}, 'pwell': {'blockage': (2, 1), 'drawing': (2, 0)},...}
+
+        :ivar dataprep_config: Filepath to a text file containing rules for dataprep. This file contains rules for the dataprep.
+                        Copied from the example dataprep.txt:
+                        File Format:
+                        File defining operations for dataprep
+                        Format:
+                        &lt;operation&gt; &lt;source layers&gt; &lt;destination layers&gt; &lt;sizing amount in microns&gt;
+                        Operations supported: add,sub
+                            * add: Create a region from all shapes of the source layers and combine this region with each destion layer region separately
+                            * sub: Same as add but don't build combination but cross-section instead
+                        Sizing amount uses the klayout sizing operation to size the regions of the source layers
+                        During dataprep the regions are merged, meaning overlapping polygons will become one Polygon
+                        source/destination layers are separated by commas if there are multiple
+                        Each argument is separated by white spaces. How many should not matter as they will be parsed by a python str.split() operation which should be able to handle any white space amount.
+                        If the first word of a line is not a supported operation the line will be ignored
+                        The lines will be executed in order meaning and add sub operations on layers will be different than a first sub and then add
+                        :Examples:
+                            active.blockage,poly.blockage,metal1.blockage,metal2.blockage,metal3.blockage,metal4.blockage,metal5.blockage,nwell.drawing,nimplant.drawing 2.0
+
+        :ivar clean_rules:     list containing the layer/purpose numbers and the minWidth/minSpacing rules for the layer/purpose pair in microns
+                        :Examples:
+                            [[(1, 0), 0.035, 0.045], [(2, 0), 0.22, 0.35], [(3, 0), 0.25, 0.25], ...]
+        """
+
+    # Define the metals &amp; via names. They will be used in some PCells (Electrodes and ViaStack)
+    metal_names = ['metal' + str(i) for i in range(1, 11)]
+    via_names = ['via' + str(i) for i in range(1, 10)]
+
+
+    def __init__(self):
+        PhotDevice.__init__(self)
+        
+        techpath = pya.Technology.technology_by_name('FreePDK45').base_path()
+        filename = techpath + '/FreePDK45.tf'
+        
+        # Check if techfile is correctly imported and located
+        
+        isfile = os.path.isfile(filename)
+        if not isfile:
+            import sys
+            msg = pya.QMessageBox(pya.Application.instance().main_window())
+            msg.text = 'Please import the techfile of the technology to {} before using the module and reopen KLayout'.format(filename)
+            msg.windowTitle = 'ImportError'
+            msg.exec_()
+        
+        tech = con.load_from_tech(filename)
+        
+        # Get the layermap file and load it.
+        # CAREFUL: Will be used for dataprep and others
+        self.layermap = lm.load(techpath + '/FreePDK45.layermap')
+
+        # This variable will be imported by the dataprep algorithm
+        # CAREFUL: Will be imported for dataprep
+        self.dataprep_config = techpath + '/dataprep.txt'
+
+        # Create all Cleaning Rules. As new Layers have been implemented
+        drlayer_names = ['active', 'pwell', 'nwell', 'pimplant', 'nimplant', 'poly'] + ['metal' + str(i) for i in
+                                                                                  range(1, 11)]
+        vio_widths = [tech[drname]['minWidth'] for drname in drlayer_names]
+        vio_spaces = [tech[drname]['minSpacing'] for drname in drlayer_names]
+
+        # add the blockage layers for manhattanization (clenawidths 1)
+        vio_widths += [1] * len(vio_widths)
+        vio_spaces += [1] * len(vio_spaces)
+        # convert layer names to layer numbers and add blockage layers
+        dr_layers = [self.layermap[n]['drawing'] for n in drlayer_names] + [self.layermap[n]['blockage'] for n in
+                                                                            drlayer_names]
+
+        # Rules for the cleaner in the form [[(layer1,purpose1),violation_width1,violation_space1],[(layer2,purpose2),violation_width2,violation_space2],...]
+        ### CAREFUL: This variable will be imported for the cleaning.
+        self.clean_rules = [[l, w, s] for l, w, s in zip(dr_layers, vio_widths, vio_spaces)]
+        
+
+
+class FreePDK45ExampleRing(FreePDK45Cell):
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        self.add_layer('lpp', 'phot_poly.drawing')
+        params = dict(
+            r_out=2.0,
+            r_in=1.5,
+            circle_split_length=0.025,
+        )
+        self.add_params(params)
+        
+    def shapes(self):
+    
+        n_deg_out = math.ceil(self.r_out/self.circle_split_length)
+        n_deg_in = math.ceil(self.r_in/self.circle_split_length)
+        
+        # ring points. every self.circlle_split_length a point is calculated and inserted.
+        p_out = [pya.DPoint(self.r_out*math.cos(x),self.r_out*math.sin(x)) for x in np.linspace(0,2*math.pi,n_deg_out)]
+        p_in = [pya.DPoint(self.r_in*math.cos(x),self.r_in*math.sin(x)) for x in np.linspace(0,2*math.pi,n_deg_in)]
+        
+        
+        poly = pya.DPolygon(p_out)
+        poly.insert_hole(p_in)
+        
+        self.create_polygon(poly, self.lpp)
+        
+class FreePDK45ExampleSpokes(FreePDK45Cell):
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        self.add_layer('lpp','phot_silicon.drawing')
+        params = dict(r_out = 5.,
+                      r_in = 4.,
+                      n = 20,
+                      width = 0.5,
+                      offset = 0.0, #0.0-1.0
+                      edge_length = 0.025,
+                      )
+        self.add_params(params)
+        
+    def shapes(self):
+        d_theta = 2*math.pi/self.n
+        offset = d_theta * self.offset
+        
+        n_deg_out = math.ceil(self.r_out/self.n*self.width/self.edge_length)
+        n_deg_in = math.ceil(self.r_in/self.n*self.width/self.edge_length)
+        
+        # roundings on in- and outside
+        points = [[self.r_out*math.cos(x),self.r_out*math.sin(x)] for x in np.linspace(0,2*math.pi/self.n*self.width,n_deg_out)]
+        points.extend([[self.r_in*math.cos(x),self.r_in*math.sin(x)] for x in np.linspace(2*math.pi/self.n*self.width,0,n_deg_in)])
+        
+        points = np.matrix(points)
+        
+        offset_rot = np.matrix([[np.cos(offset),-np.sin(offset)],[np.sin(offset),np.cos(offset)]])
+        rot = np.matrix([[np.cos(d_theta),-np.sin(d_theta)],[np.sin(d_theta),np.cos(d_theta)]])
+        
+        points = np.dot(points,offset_rot.T)
+        
+        for i in range(self.n):
+            points = np.dot(points,rot.T)
+            self.create_polygon(np.array(points),self.lpp)
+        
+
+class FreePDK45ExampleViaStack(FreePDK45Cell):
+
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        # add all layers on which we might add polygons
+        for m in self.metal_names:
+            self.add_layer(m, ld=self.layermap[m]['drawing'], hidden=True)
+        for v in self.via_names:
+            self.add_layer(v, ld=self.layermap[v]['drawing'], hidden=True)
+        self.add_layer('silicon', ld=self.layermap['phot_silicon']['drawing'], hidden=True)
+        self.add_layer('contact', ld=self.layermap['contact']['drawing'], hidden=True)
+        # define bottom and top layer which we want to connect
+        params = dict(
+            bot_layer='phot_silicon',
+            top_layer='metal3',
+        )
+        self.add_params(params)
+
+    def shapes(self):
+        # which vias to use
+        met1 = self.bot_layer
+
+        # Load the via example cells from FreePDK45_tech/libraries/vias.gds
+        lib = pya.Library.library_by_name('FreePDK45_vias')
+        # Create the via names we want to add
+        via_cellnames = ['VIA_M{}_M{}_via'.format(i + 1, i) for i in range(1, 10)]
+        # There is no cell for the lowest via, so create it ourselves
+        if self.bot_layer == 'phot_silicon':
+            pts_s = [[-.07, -.07], [.07, -.07], [.07, .07], [-.07, .07]]
+            pts_m1 = [[-.075, -.075], [.075, -.075], [.075, .075], [-.075, .075]]
+            pts_contact = [[-.07, -.07], [.07, -.07], [.07, .07], [-.07, .07]]
+            self.create_polygon(pts_s, self.silicon)
+            self.create_polygon(pts_m1, self.metal1)
+            self.create_polygon(pts_contact, self.contact)
+            met1 = self.metal_names[0]
+        ind1 = self.metal_names.index(met1)
+        ind2 = self.metal_names.index(self.top_layer)
+        for via in via_cellnames[ind1:ind2 + 1]:
+            # try to find a via in library throw error if it fails
+            lib_cell = lib.layout().cell(via)
+            if not lib_cell:
+                raise ValueError('Library cell {} not found in {}'.format(via, lib.name()))
+            # add a via for each via layer transversed
+            cell_ind = self.layout.add_lib_cell(lib, lib_cell.cell_index())
+            self.cell.insert(pya.CellInstArray(cell_ind, pya.Trans.R0))
+
+class FreePDK45_WgFromPath(FreePDK45Cell):
+
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        self.add_layer("lpp", 'poly.drawing')
+        params = {
+            "wg_width": .5,
+            "x": [0, 1],
+            "y": [0, 0],
+        }
+        self.add_params(params)
+
+    def create_param_inst(self):
+        path = list(zip([float(i) for i in self.x], [float(i) for i in self.y]))
+
+        # correct first element to 90 deg angle:
+        dx1 = path[1][0] - path[0][0]
+        dy1 = path[1][1] - path[0][1]
+        dx2 = path[-2][0] - path[-1][0]
+        dy2 = path[-2][1] - path[-1][1]
+        
+        # create ports. only allow x*90deg
+        if np.abs(dx1) &gt; np.abs(dy1):
+            dr = 0 if dx1 &lt; 0 else 180
+            p1 = PortCreation(path[0][0], path[0][1], dr, self.wg_width)
+        else:
+            dr = 90 if dy1 &lt; 0 else 270
+            p1 = PortCreation(path[0][0], path[0][1], dr, self.wg_width)
+        if np.abs(dx2) &gt; np.abs(dy2):
+            dr = 0 if dx2 &lt; 0 else 180
+            p2 = PortCreation(path[-1][0], path[-1][1], dr, self.wg_width)
+        else:
+            dr = 90 if dy2 &lt; 0 else 270
+            p2 = PortCreation(path[-1][0], path[-1][1], dr, self.wg_width)
+
+        return p1, p2
+
+    def shapes(self):
+
+        path = list(zip([float(i) for i in self.x], [float(i) for i in self.y]))
+
+        # correct first element to 90 deg angle:
+        dx1 = path[1][0] - path[0][0]
+        dy1 = path[1][1] - path[0][1]
+        dx2 = path[-2][0] - path[-1][0]
+        dy2 = path[-2][1] - path[-1][1]
+
+        if np.abs(dx1) &gt; np.abs(dy1):
+            x1 = np.sign(dx1) * .001
+            path.insert(1, [path[0][0] + x1, path[0][1]])
+        else:
+            y1 = np.sign(dy1) * .001
+            path.insert(1, [path[0][0], path[0][1] + y1])
+        if np.abs(dx2) &gt; np.abs(dy2):
+            x2 = np.sign(dx2) * .001
+            path.insert(-1, [path[-1][0] + x2, path[-1][1]])
+        else:
+            y2 = np.sign(dy2) * .001
+            path.insert(-1, [path[-1][0], path[-1][1] + y2])
+
+        self.create_path(path, self.wg_width, self.lpp)
+
+class FreePDK45CosWaveguide(FreePDK45Cell):
+    
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        self.add_layer('lpp','phot_silicon.drawing')
+        params = dict( height = 5.,
+                       length = 15.,
+                       wg_width = 0.5,
+                       step_size = 0.01
+                       )
+        self.add_params(params)
+                       
+    def create_param_inst(self):
+        xpoints = []
+        ypoints = []
+        # Y-Axis is cosine(X-Axis)
+        [(xpoints.append(x*self.length),ypoints.append(np.cos(x*np.pi)*self.height/2 - self.height/2)) for x in np.arange(0,1,self.step_size)]
+        wgparams = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                        cellname = 'WgFromPath',
+                        x = xpoints,
+                        y = ypoints,
+                        wg_width = self.wg_width,
+                        lpp = self.lpp
+                        )
+        wg = self.add_pcell_variant(wgparams)
+        return wg
+
+class FreePDK45CosTaper(FreePDK45Cell):
+    
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        params = dict( width0 = .5,
+                       width1 = 2.0,
+                       length = 5.0,
+                       step_size = .001,
+                       )
+        self.add_layer('lpp','phot_silicon.drawing')
+        self.add_params(params)
+        
+    def create_param_inst(self):
+        # Add Ports to Front and End
+        port0 = PortCreation(-self.length/2, 0, 180, self.width0)
+        port1 = PortCreation(self.length/2, 0, 0, self.width1)
+        
+        return port0,port1
+        
+    def shapes(self):
+        #Bottom and top Cosine-Form
+        points = [[x*self.length-self.length/2,((np.cos((x+1)*np.pi)+1)/2*(self.width1-self.width0)/2 + self.width0/2)] for x in np.arange(0,1,self.step_size)]
+        points.extend(reversed([[x*self.length-self.length/2,-((np.cos((x+1)*np.pi)+1)/2*(self.width1-self.width0)/2 + self.width0/2)] for x in np.arange(0,1,self.step_size)]))
+        self.create_polygon(points,self.lpp)
+
+class FreePDK45Grating(FreePDK45Cell):
+    
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        params = dict( grating_n = 10,
+                       grating_width = 0.2,
+                       grating_slot = 0.15,
+                       wg_width = 2.0
+                       )
+        self.add_layer('lpp','phot_silicon.drawing')
+        self.add_layer('polysilicon','phot_poly.drawing')
+        for i in self.metal_names:
+            self.add_layer(i,i+'.blockage')
+        
+        self.add_layer('n_implant','phot_nimplant.drawing')
+        self.add_layer('p_implant','phot_pimplant.drawing')
+        
+        self.add_params(params)
+        
+    def create_param_inst(self):
+        port0 = PortCreation(0,0,180, self.wg_width)
+        
+        return port0
+        
+    def shapes(self):
+        x = 0
+        #Grating Slots
+        for i in range(self.grating_n):
+            x += self.grating_width
+            points = [[x,-self.wg_width/2],[x,self.wg_width/2],[x+self.grating_slot,self.wg_width/2],[x+self.grating_slot,-self.wg_width/2]]
+            self.create_polygon(points,self.lpp)
+            x+= self.grating_slot
+        
+        points = [[-1.0,-(self.wg_width/2+1)],[1.0+self.grating_n*(self.grating_width+self.grating_slot),-(self.wg_width/2+1)],
+                   [1.0+self.grating_n*(self.grating_width+self.grating_slot),(self.wg_width/2+1)],[-1.0,(self.wg_width/2+1)]]
+        #Metal Exclusions
+        for metal in self.metal_names:
+            layer = self.get_layer(metal + '.blockage')
+            self.create_polygon(points,layer)
+             
+        
+
+class FreePDK45Modulator(FreePDK45Cell):
+    
+    def __init__(self):
+        FreePDK45Cell.__init__(self)
+        params = dict( r_in = 4.0,
+                       r_out = 5.0,
+                       spoke_big_length = 1.5,
+                       spoke_small_length = 1.,
+                       spoke_width = .25,
+                       couple_slot = 0.4,
+                       couple_length = 15.,
+                       wg_width = .5,
+                       )
+        self.add_layer('silicon','phot_silicon.drawing')
+        self.add_layer('polysilicon','phot_poly.drawing')
+        self.add_layer('n_implant','phot_nimplant.drawing')
+        self.add_layer('p_implant','phot_pimplant.drawing')
+        
+        self.add_params(params)
+
+    def create_param_inst(self):
+        
+        
+        #Silicon Ring
+        p_sil_ring = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                      cellname = 'Ring',
+                      r_out=self.r_out,
+                      r_in=self.r_in,
+                      lpp=self.silicon
+                      )
+        sil_ring = self.add_pcell_variant(p_sil_ring)
+        #Long Spokes
+        p_sil_spokes_l = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                                cellname = 'Spokes',
+                                r_in = self.r_in-self.spoke_big_length,
+                                r_out = self.r_in,
+                                lpp = self.silicon,
+                                width = self.spoke_width,
+                                )
+        #Short Spokes
+        p_sil_spokes_s = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                                cellname = 'Spokes',
+                                r_in = self.r_in-self.spoke_small_length,
+                                r_out = self.r_in,
+                                lpp = self.silicon,
+                                offset = 0.5,
+                                width = self.spoke_width,
+                                )                                
+        
+        sil_spokes_l = self.add_pcell_variant(p_sil_spokes_l)
+        sil_spokes_s = self.add_pcell_variant(p_sil_spokes_s)
+        
+        #p-doped spokes
+        p_p_spokes = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                           cellname = 'Spokes',
+                           r_in = self.r_in-self.spoke_small_length,
+                           r_out = .25*self.r_out + .75*self.r_in,
+                           lpp = self.p_implant,
+                           width = self.spoke_width,
+                           offset=.5,
+                           )
+        #n-doped spokes
+        p_n_spokes = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                           cellname = 'Spokes',
+                           r_in = self.r_in-self.spoke_big_length,
+                           r_out = .25*self.r_out + .75*self.r_in,
+                           lpp = self.n_implant,
+                           width = self.spoke_width,
+                           )
+        p_spokes = self.add_pcell_variant(p_p_spokes)
+        n_spokes = self.add_pcell_variant(p_n_spokes)
+        
+        #n-doped Ringe and Fillings
+        p_n_ring = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                      cellname = 'Ring',
+                      r_out=self.r_out,
+                      r_in= .25*self.r_out + .75*self.r_in,
+                      lpp=self.n_implant
+                      )
+        n_ring = self.add_pcell_variant(p_n_ring)
+        p_n_filler_spokes = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                                 cellname = 'Spokes',
+                                 lpp = self.n_implant,
+                                 r_out= .25*self.r_out + .75*self.r_in,
+                                 r_in = self.r_in,
+                                 width=.75,
+                                 offset=0.75,
+                                 )
+        n_filler_spokes = self.add_pcell_variant(p_n_filler_spokes)
+        
+        #Waveguides connecting Gratings to Coupler
+        p_straight_wgs = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                              cellname = 'WgFromPath',
+                              x = [0,10],
+                              y = [0,0],
+                              width = self.wg_width,
+                              lpp = self.silicon,
+                              )
+        straight_wgs = self.add_pcell_variant(p_straight_wgs,number=2)
+        
+        #Cos-Waveguide to Gratings
+        p_cos_wgs = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                              cellname = 'CosineWaveGuide',
+                              height = -(self.r_out + self.couple_slot),
+                              length = self.couple_length,
+                              wg_width = 0.5,
+                              step_size = 0.01,
+                              lpp = self.silicon,
+                              )
+        cos_wgs = self.add_pcell_variant(p_cos_wgs,number=2)
+        
+        #Cos-Tapers connecting coupler and Gratings
+        p_cos_tapers = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                              cellname = 'CosineTaper',
+                              width0 = self.wg_width,
+                              width1 = 1.5,
+                              length = 7.5,
+                              step_size = .001,
+                              lpp = self.silicon,
+                              )
+        cos_tapers = self.add_pcell_variant(p_cos_tapers,number=2)
+        
+        #Gratings
+        p_gratings = dict(lib = 'FreePDK45_Photonic_ExampleCells',
+                          cellname = 'Grating',
+                          grating_n = 10,
+                          grating_width = 0.2,
+                          grating_slot = 0.15,
+                          wg_width = 1.5,
+                          lpp = self.silicon,
+                          )
+        gratings = self.add_pcell_variant(p_gratings,number=2)
+        
+        #Move the first Coupler Part into Position and mirror it       
+        cos_wgs[0].move(-self.couple_length,0,mirrx=True)
+        
+        #Connect second part of Coupler
+        self.connect_port_to_port(cos_wgs[0].port(1), cos_wgs[1].port(0))
+        #Connect Waveguides to Coupler
+        self.connect_port_to_port(cos_wgs[0].port(0), straight_wgs[0].port(0))
+        self.connect_port_to_port(cos_wgs[1].port(1), straight_wgs[1].port(0))
+        #Connect Cos-Tapers to Coupler
+        self.connect_port_to_port(straight_wgs[0].port(1), cos_tapers[0].port(0))
+        self.connect_port_to_port(straight_wgs[1].port(1), cos_tapers[1].port(0))
+        #Connect Tapers to Tapers
+        self.connect_port_to_port(cos_tapers[0].port(1), gratings[0].port(0))
+        self.connect_port_to_port(cos_tapers[1].port(1), gratings[1].port(0))
+        
+        #Return everything
+        return sil_ring,sil_spokes_l,sil_spokes_s,n_ring,p_spokes,n_spokes,n_filler_spokes,straight_wgs,cos_wgs,cos_tapers,gratings
+
+
+class FreePDK45_PhotonicsLib(pya.Library):
+    def __init__(self):
+        # Set the description
+        self.description = "FreePDK45 ExampleCells"
+        self.technology = "FreePDK45"
+        # Create the PCell declarations
+        self.layout().register_pcell("Ring", FreePDK45ExampleRing())
+        self.layout().register_pcell("Spokes", FreePDK45ExampleSpokes())
+        self.layout().register_pcell("WgFromPath", FreePDK45_WgFromPath())
+        self.layout().register_pcell("ViaStack", FreePDK45ExampleViaStack())
+        self.layout().register_pcell("CosineWaveGuide", FreePDK45CosWaveguide())
+        self.layout().register_pcell("Modulator", FreePDK45Modulator())
+        self.layout().register_pcell("CosineTaper", FreePDK45CosTaper())
+        self.layout().register_pcell("Grating", FreePDK45Grating())
+        
+        self.register("FreePDK45_Photonic_ExampleCells")
+
+
+# Instantiate and register the library
+FreePDK45_PhotonicsLib()
+</text>
+</klayout-macro>
