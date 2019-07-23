@@ -40,8 +40,6 @@ import os
 import kppc.photonics.techconstraints as con
 
 import kppc.photonics
-from importlib import reload
-reload(kppc.photonics)
 
 class FreePDK45Cell(PhotDevice):
     """Class that provides technology specific data. Currently the backend needs 3 things to be supplied by the technology of the PCells.
@@ -278,21 +276,26 @@ class FreePDK45_WgFromPath(FreePDK45Cell):
         # correct first element to 90 deg angle:
         dx1 = path[1][0] - path[0][0]
         dy1 = path[1][1] - path[0][1]
-        dx2 = path[-2][0] - path[-1][0]
-        dy2 = path[-2][1] - path[-1][1]
+        dx2 = path[-1][0] - path[-2][0]
+        dy2 = path[-1][1] - path[-2][1]
+
+
+        # Apparently KLayout pathes don´t like points close to each other.
+        # So, increased to what usually is 100 nm for direction forcing on the four directions
+        correction_length = 100*self.layout.dbu
 
         if np.abs(dx1) &gt; np.abs(dy1):
-            x1 = np.sign(dx1) * .001
-            path.insert(1, [path[0][0] + x1, path[0][1]])
+            x1 = np.sign(dx1) * correction_length
+            path.insert(1, (path[0][0] + x1, path[0][1]))
         else:
-            y1 = np.sign(dy1) * .001
-            path.insert(1, [path[0][0], path[0][1] + y1])
+            y1 = np.sign(dy1) * correction_length
+            path.insert(1, (path[0][0], path[0][1] + y1))
         if np.abs(dx2) &gt; np.abs(dy2):
-            x2 = np.sign(dx2) * .001
-            path.insert(-1, [path[-1][0] + x2, path[-1][1]])
+            x2 = np.sign(dx2) * correction_length
+            path.insert(-1, (path[-1][0] - x2, path[-1][1]))
         else:
-            y2 = np.sign(dy2) * .001
-            path.insert(-1, [path[-1][0], path[-1][1] + y2])
+            y2 = np.sign(dy2) * correction_length
+            path.insert(-1, (path[-1][0], path[-1][1] - y2))
 
         self.create_path(path, self.wg_width, self.lpp)
 
@@ -312,7 +315,7 @@ class FreePDK45CosWaveguide(FreePDK45Cell):
         xpoints = []
         ypoints = []
         # Y-Axis is cosine(X-Axis)
-        [(xpoints.append(x*self.length),ypoints.append(np.cos(x*np.pi)*self.height/2 - self.height/2)) for x in np.arange(0,1,self.step_size)]
+        [(xpoints.append(x*self.length),ypoints.append(np.cos(x*np.pi)*self.height/2 - self.height/2)) for x in np.linspace(0,1,np.ceil(np.divide(1,self.step_size)))]
         wgparams = dict(lib = 'FreePDK45_Photonic_ExampleCells',
                         cellname = 'WgFromPath',
                         x = xpoints,

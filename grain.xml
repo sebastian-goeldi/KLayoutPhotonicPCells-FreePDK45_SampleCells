@@ -3,7 +3,7 @@
  <name>KLayoutPhotonicPCells/FreePDK45_SampleCells</name>
  <token/>
  <hidden>false</hidden>
- <version>0.0.3</version>
+ <version>0.0.4</version>
  <api-version>0.25</api-version>
  <title>Example Cells for KLayout_Photonics/core</title>
  <doc>Uses  KLayoutPhotonicPCells/core and KLayoutPhotonicPCells/FreePDK45_tech to create a PCell of a Modulator. Also shows how to create and combine PCells.</doc>
@@ -18,11 +18,11 @@
  <depends>
   <name>KLayoutPhotonicPCells/core</name>
   <url/>
-  <version>0.0.4</version>
+  <version>1.0.3</version>
  </depends>
  <depends>
   <name>KLayoutPhotonicPCells/FreePDK45_tech</name>
   <url/>
-  <version>0.0.2</version>
+  <version>0.0.3</version>
  </depends>
 </salt-grain>
